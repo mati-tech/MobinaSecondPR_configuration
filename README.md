@@ -1,84 +1,98 @@
-# Maven Dependency Graph Tool — Variant 23
+# Инструмент построения графа зависимостей Maven (вариант 23)
 
-A Python 3.10+ command-line application that reads Maven `pom.xml` files
-without invoking Maven or using a third-party dependency-fetching package.
-It builds a bounded dependency graph with iterative breadth-first search,
-supports local test graphs, reports a dependency-first load order, writes
-D2 diagram source, and creates a PNG visualization using only Python's
-standard library.
+Инструмент командной строки, который строит и визуализирует граф зависимостей Java-пакета (Maven). Он читает файлы `pom.xml` напрямую из репозитория Maven по протоколу HTTP(S) или `file://`, **без использования Maven и без сторонних библиотек**: используется только стандартная библиотека Python.
 
-## Requirements
+Что он делает:
 
-- Python 3.10 or newer
-- No third-party runtime packages
-- `pytest` is optional and required only to run the test suite
+- принимает все настройки из опций командной строки;
+- скачивает POM запрошенной **версии** пакета и извлекает его прямые зависимости (включая версии, унаследованные от родительских POM);
+- строит транзитивный граф с помощью итеративного BFS (без рекурсии), ограниченного максимальной глубиной, пропуская пакеты, имя которых содержит заданную подстроку, и корректно завершая работу при наличии циклов;
+- работает с локальным *тестовым репозиторием* (пакеты с именами `A`, `B`, ...);
+- выводит порядок загрузки (сначала зависимости) и ASCII-дерево;
+- сохраняет граф в виде исходного кода D2 и изображения PNG.
 
-## Repository layout
+## Требования
+
+- Python 3.10 или новее, без сторонних пакетов;
+- опционально: команда [`d2`](https://d2lang.com). Если она установлена, PNG рендерится с помощью D2; в противном случае используется встроенный рендерер.
+
+## Структура репозитория
 
 ```text
-dependency_graph_tool/
-├── README.md
-├── .gitignore
-├── Makefile
-├── src/
-│   ├── __init__.py
-│   ├── config.py
-│   ├── errors.py
-│   ├── parser.py
-│   ├── repository.py
-│   ├── graph.py
-│   ├── visualizer.py
-│   └── main.py
-└── tests/
-    ├── test_config.py
-    ├── test_parser.py
-    ├── test_graph.py
-    ├── test_visualizer.py
-    └── fixtures/
-        ├── acyclic.txt
-        ├── cyclic.txt
-        └── filtered.txt
+README.md  .gitignore  Makefile  run.bat
+src/
+  config.py      Опции CLI и валидация
+  errors.py      Исключения приложения
+  pom.py         Парсер XML POM
+  resolver.py    Свойства, управляемые версии, области видимости (scopes)
+  repository.py  Доступ к репозиторию Maven (urllib) и цепочка родителей
+  local_repo.py  Чтение файла тестового репозитория
+  graph.py       Построение графа BFS и фильтрация
+  order.py       Порядок загрузки (итеративный DFS) и уровни слоев
+  tree.py        ASCII-дерево
+  d2.py          Вывод в формате D2
+  font.py        Встроенный растровый шрифт
+  raster.py      Пиксельный холст и кодировщик PNG
+  layout.py      Слоистая компоновка узлов
+  visualizer.py  Рендеринг PNG (CLI D2 или встроенный)
+  main.py        Точка входа
+tests/           Модульные тесты и фикстуры (крошечный репозиторий Maven)
 ```
 
-## CLI settings
+## Настройки (опции командной строки)
 
-| Option | Meaning |
-| --- | --- |
-| `--package` | Root package coordinate: `group:artifact:version` |
-| `--repository` | Maven repository base URL or direct `pom.xml` URL |
-| `--test-mode` | Read a local adjacency-list text file instead |
-| `--test-file` | Path to the local test graph |
-| `--version` | Version to analyze; overrides the version in `--package` |
-| `--image` | Output PNG filename |
-| `--ascii-tree` | Print dependencies as an ASCII tree |
-| `--max-depth` | Maximum BFS depth; root has depth zero |
-| `--filter` | Exclude package names containing this substring |
-| `--load-order` | Print a dependency-first topological load order |
-| `--d2-file` | Output D2 diagram source filename |
+| Опция | Значение | По умолчанию |
+| --- | --- | --- |
+| `--package` | Имя пакета: `group:artifact` (Maven) или имя, например `A` (тестовый режим). Также принимается `group:artifact:version` | обязательно |
+| `--repository` | URL репозитория Maven (`http://`, `https://`, `file://`) или, при `--test-mode`, путь к файлу тестового графа | обязательно |
+| `--test-mode` | Рассматривать `--repository` как файл тестового графа | выкл. |
+| `--version` | Версия пакета (режим Maven) | из `--package` |
+| `--image` | Имя выходного файла PNG (должно заканчиваться на `.png`) | `dependency-graph.png` |
+| `--ascii-tree` | Вывести зависимости в виде ASCII-дерева | выкл. |
+| `--max-depth` | Максимальная глубина; корень имеет глубину 0 | `3` |
+| `--filter` | Игнорировать пакеты, имя которых (`group:artifact`) содержит эту подстроку | пусто |
+| `--load-order` | Вывести порядок загрузки (сначала зависимости) | выкл. |
+| `--d2-file` | Имя выходного файла исходного кода D2 (должно заканчиваться на `.d2`) | `dependency-graph.d2` |
 
-At startup, all settings are printed as key-value pairs. In test mode,
-`--package` is the name of the root node (for example `A`). In Maven mode,
-it must be a Maven coordinate. The `--repository` value may be a Maven
-repository root (for example `https://repo1.maven.org/maven2`) or a URL
-that points directly to a POM file.
+При запуске каждая настройка выводится в формате `ключ=значение`. При неверном вводе (неверная глубина, отсутствующий файл, неверный URL, неверный формат пакета, отсутствующая или конфликтующая версия, неверные расширения, отсутствующая папка для вывода, нечитаемый POM, ...) выводится сообщение `Error: <причина>` в stderr и код выхода `2`.
 
-## Run
+## Функции
+
+**`config.py`** — `build_argument_parser()` объявляет опции; `parse_config(args)` парсит и валидирует их в неизменяемый `Config`; `split_package()` разбивает `group:artifact[:version]`; `is_package_letters()` проверяет имена тестовых пакетов; `print_config()` выводит пары `ключ=значение`.
+
+**`pom.py`** — `parse_pom(xml_text)` читает POM в `PomInfo` (координаты, родитель, `<properties>`, `<dependencyManagement>`, `<dependencies>`).
+
+**`resolver.py`** — `substitute()` раскрывает `${...}`; `project_properties()` объединяет свойства по цепочке родителей и добавляет `project.version`, `project.groupId`, ...; `managed_versions()` собирает управляемые версии; `resolve_dependencies()` возвращает прямые зависимости `compile`/`runtime` в виде `group:artifact:version` плюс предупреждения. Зависимости `test`, `provided`, `system` и `optional` пропускаются.
+
+**`repository.py`** — `fetch_text(url)` скачивает текст с помощью `urllib`; `MavenRepository.pom_url()` строит `<repo>/<путь группы>/<artifact>/<version>/<artifact>-<version>.pom`; `load_chain()` загружает POM и его родителей (итеративно); `dependencies(coordinate)` возвращает прямые зависимости одной версии.
+
+**`local_repo.py`** — `parse_test_graph(path)` читает тестовый репозиторий.
+
+**`graph.py`** — `build_graph(root, loader, max_depth, filter)` — это BFS: очередь из `(node, depth)`, каждый узел раскрывается один раз, узлы на `max_depth` сохраняются, но не раскрываются, отфильтрованные пакеты никогда не добавляются.
+
+**`order.py`** — `load_order(graph, root)` возвращает порядок обхода (post-order) итеративного DFS (сначала зависимости) и список найденных циклов; `layer_levels()` выдает уровни самого длинного пути для диаграммы.
+
+**`tree.py`** — `ascii_tree(graph, root)`; узел, замыкающий цикл, помечается `(cycle)`, узел, чьи дочерние элементы уже были выведены, помечается `(*)`.
+
+**`d2.py`**, **`visualizer.py`** — `build_d2()` / `write_d2()` создают исходный код D2; `create_image()` запускает `d2`, если доступен, и переключается на встроенный рендерер (`render_png()`).
+
+## Сборка, запуск, тестирование
+
+Шаг сборки не требуется.
 
 ```bash
 python -m src.main --help
-
-# Local graph
-python -m src.main --package A --test-mode --test-file tests/fixtures/acyclic.txt \
-  --ascii-tree --load-order --image graph.png --d2-file graph.d2
-
-# Maven Central (the package must exist at the selected repository)
-python -m src.main --package org.slf4j:slf4j-api:2.0.13 \
-  --repository https://repo1.maven.org/maven2 --max-depth 2 \
-  --ascii-tree --load-order
+make run          # пример в тестовом режиме (или: run.bat в Windows)
+make test         # то же самое, что: python -m unittest discover -s tests -v
+make demo         # три примера Maven, изображения сохраняются в build/
+make clean
 ```
 
-The test-file format is one package per line, followed by a colon and a
-comma-separated list of its dependencies. Empty dependency lists are valid.
+## Примеры
+
+### Тестовый репозиторий (этап 3)
+
+Формат файла: `PACKAGE: DEP1, DEP2`. Имена состоят из заглавных латинских букв; пустой список допустим; `#` начинает строку комментария.
 
 ```text
 A: B, C
@@ -87,76 +101,130 @@ C: D
 D:
 ```
 
-## Three test examples
-
-**Example 1 — acyclic graph**
-
-Input: `A: B, C`, `B: D`, `C: D`, `D:`
+```bash
+python -m src.main --package A --test-mode \
+  --repository tests/fixtures/acyclic.txt --ascii-tree --load-order
+```
 
 ```text
 A
-├── B
-│   └── D
-└── C
-    └── D
+|-- B
+|   `-- D
+`-- C
+    `-- D
+Dependency-first load order:
+D -> B -> C -> A
 ```
 
-Dependency-first load order: `D -> B -> C -> A`.
+**Цикл** (`tests/fixtures/cyclic.txt`: `A: B`, `B: C`, `C: A`):
 
-**Example 2 — cycle**
+```text
+A
+`-- B
+    `-- C
+        `-- A (cycle)
+Dependency-first load order:
+C -> B -> A
+Warning: dependency cycle A -> B -> C -> A
+```
 
-Input: `A: B`, `B: C`, `C: A`
+**Ограничение глубины** (`tests/fixtures/deep.txt`, `--max-depth 1`): в графе только `A`, `B` и `C`; `--max-depth 0` оставляет только `A`.
 
-The graph traversal terminates because each node is expanded once.
-Topological sorting reports a cycle instead of returning a false order.
+**Фильтр** (`--filter C` на `acyclic.txt`): `C` исключается, поэтому граф выглядит как `A -> B -> D`.
 
-**Example 3 — substring filter**
-
-Input: `A: B, C`, `B:`, `C:`
-
-With `--filter C`, the graph contains `A` and `B`; `C` is excluded.
-
-## Maven parsing and limitations
-
-The POM reader uses Python's standard-library XML parser. It extracts
-direct `<dependencies>` entries, resolves simple `${property}` version
-references, and ignores test, provided, system, and optional dependencies.
-It does not implement the complete Maven model-building process:
-parent inheritance, profiles, dependency mediation, BOM imports,
-plugin dependencies, classifiers, version ranges, and all Maven property
-rules are outside this assignment's scope. A repository root is used to
-construct Maven's standard group/artifact/version POM path. For a direct
-POM URL, only the root POM can be loaded unless its dependency POMs are
-available through a repository URL.
-
-The reported topological order is a graph-theory dependency-first order.
-Real Maven resolution also applies scopes, exclusions, conflict mediation,
-nearest-definition rules, parent POMs, BOMs, plugins, and lifecycle phases.
-Therefore, this simplified order is not guaranteed to match Maven's
-actual build or classpath resolution order.
-
-## Visualization
-
-The program always writes D2 source to `--d2-file`. It also creates a
-basic PNG graph using a small standard-library renderer. The PNG is a
-simple static visualization rather than a layout-engine-quality diagram.
-If D2 is installed, the source can additionally be compiled with:
+### Репозиторий Maven (этапы 2-5)
 
 ```bash
-d2 graph.d2 graph-from-d2.png
+python -m src.main --package org.slf4j:slf4j-api --version 2.0.13 \
+  --repository https://repo1.maven.org/maven2 --max-depth 2 \
+  --ascii-tree --load-order --image slf4j.png --d2-file slf4j.d2
 ```
 
-## Tests
+`tests/fixtures/maven_repo` — это небольшой репозиторий в структуре Maven, используемый тестами и `make demo` (через URL `file://`). Он содержит родительский POM, `${properties}`, `dependencyManagement`, области видимости, опциональную зависимость и цикл.
+
+## Этап 4: порядок загрузки и сравнение с Maven
+
+Порядок загрузки — это post-order DFS графа зависимостей: пакет появляется после всех пакетов, которые ему нужны. Для `com.example:app:1.0` (фикстура):
+
+```text
+logging:1.5 -> util:3.1 -> core:2.0 -> logging:1.4 -> runtime-lib:1.0 -> app:1.0
+```
+
+(каждое имя — это `com.example:<artifact>:<version>`). Чтобы сравнить с работой реального менеджера пакетов, запустите в проекте, который зависит от того же пакета:
+
+```bash
+mvn dependency:tree
+mvn dependency:build-classpath
+```
+
+Ожидаемые различия и их причины:
+
+- **Конфликты версий.** Maven сохраняет одну версию на артефакт (ближайшую к корню, первую объявленную при равенстве). Этот инструмент хранит каждый `group:artifact:version` как отдельный узел, поэтому `logging:1.5` и `logging:1.4` оба появляются выше, тогда как Maven оставил бы только `1.5`.
+- **Порядок.** Maven строит classpath в своем собственном порядке (порядок объявления в POM после разрешения конфликтов), который не обязательно является порядком зависимостей; порядок графа — это допустимый порядок загрузки, но не обязательно порядок Maven.
+- **Области видимости и исключения.** Maven применяет mediation областей видимости, `<exclusions>`, импорт BOM и диапазоны версий; этот инструмент пропускает только test/provided/system/optional зависимости и не поддерживает остальные.
+- **Циклы.** Резолвер Maven молча останавливается на артефакте, который уже видел; этот инструмент явно сообщает о цикле, игнорирует замыкающее ребро и все равно выводит порядок.
+
+## Этап 5: визуализация
+
+Текст D2 для `com.example:webapp:1.0` (`--max-depth 5`):
+
+```text
+direction: right
+n0: "com.example:webapp:1.0"
+n1: "com.example:app:1.0"
+n2: "com.example:util:3.1"
+n3: "com.example:logging:1.5"
+n4: "com.example:core:2.0"
+n5: "com.example:runtime-lib:1.0"
+n6: "com.example:logging:1.4"
+n0.style.fill: "#ffecb3"
+n0 -> n1
+n0 -> n2
+n0 -> n3
+n1 -> n4
+n1 -> n2
+n1 -> n5
+n2 -> n3
+n4 -> n2
+n4 -> n3
+n5 -> n6
+```
+
+Скомпилируйте его самостоятельно с помощью `d2 webapp.d2 webapp.png`, если установлен `d2`. `make demo` создает PNG-файлы для трех пакетов в `build/`:
+
+| Пакет | Что он показывает |
+| --- | --- |
+| `com.example:app:1.0` | наследование от родительского POM, области видимости, две версии одной библиотеки |
+| `com.example:webapp:1.0` | граф большего размера с общими зависимостями |
+| `com.example:cyc-a:1.0` | цикл (замыкающее ребро нарисовано красным под блоками) |
+
+Вывод ASCII для `com.example:webapp:1.0` (`(*)` = уже показано выше):
+
+```text
+com.example:webapp:1.0
+|-- com.example:app:1.0
+|   |-- com.example:core:2.0
+|   |   |-- com.example:util:3.1
+|   |   |   `-- com.example:logging:1.5
+|   |   `-- com.example:logging:1.5
+|   |-- com.example:util:3.1 (*)
+|   `-- com.example:runtime-lib:1.0
+|       `-- com.example:logging:1.4
+|-- com.example:util:3.1 (*)
+`-- com.example:logging:1.5
+```
+
+Сравнение с собственными инструментами Maven: `mvn dependency:tree` выводит дерево (в подробном режиме он также показывает опущенные дубликаты и конфликты), а `mvn dependency:tree -DoutputType=dot` выводит Graphviz DOT. Различия: Maven сворачивает конфликтующие версии в один узел (этот инструмент показывает оба), Maven включает собственные test-зависимости проекта и показывает области видимости (этот инструмент скрывает их), а дерево Maven является деревом, тогда как этот инструмент рисует граф, в котором общая зависимость является одним узлом. Встроенный рендерер PNG использует простую слоистую компоновку; если установлен `d2`, PNG имеет компоновку D2.
+
+## Ограничения парсинга Maven
+
+Поддерживается: прямые `<dependencies>`, ссылки `${property}` (собственные и унаследованные свойства, `${project.version}`, `${project.groupId}`), цепочка родительских POM, версии из `<dependencyManagement>`.
+Не поддерживается (зависимость пропускается, выводится предупреждение): диапазоны версий, неразрешимые свойства, импорт BOM (`scope=import`), профили, классификаторы, исключения, перемещение (relocation). Если *транзитивный* POM не может быть скачан, он рассматривается как лист с предупреждением; если *корневой* POM не может быть скачан, выполнение завершается ошибкой.
+
+## Тесты
 
 ```bash
 python -m unittest discover -s tests -v
-# or, if pytest is installed:
-pytest -q
 ```
 
-## Error handling
-
-Invalid CLI combinations, malformed XML, inaccessible URLs, missing files,
-invalid graph rows, and cyclic topological-order requests produce readable
-errors and a non-zero process exit code. Network requests use a timeout.
-No Maven executable or third-party dependency downloader is used.
+Тесты покрывают опции и их ошибки, парсинг POM и тестовых файлов, разрешение свойств/родителей с использованием фикстурного репозитория `file://`, BFS (глубина, фильтр, циклы, самозависимость), порядок загрузки, ASCII-дерево, текст D2, кодирование PNG, компоновку и полную программу (`tests/test_main.py`).
